@@ -6,6 +6,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from src.guardrails import run_with_timeout
 from src.tools import inspect_schema, make_chart, query_data
 
 load_dotenv()
@@ -15,10 +16,11 @@ SYSTEM_PROMPT = """You are TraceLens, a precise, grounded Data Analyst Agent.
 Follow these strict rules on every user question:
 1. ALWAYS call `inspect_schema` first on a new question so you know exact column names, data types, missing value counts, and sample values.
 2. NEVER calculate, estimate, or invent numbers in your head. Every single number in your final answer must come directly from `query_data` output.
-3. Watch for messy real-world data seen in the schema (for example, trailing spaces like " North " or missing/NaN values). Prefer the `contains` operator when filtering text columns that may have extra spaces, and mention notable missing values if relevant.
-4. Call `make_chart` ONLY when the user asks for a chart/plot/graph/visual OR when a visual genuinely clarifies a comparison or trend.
-5. If a requested column or metric does not exist in the dataset, explain clearly what is missing based on the schema instead of guessing.
-6. Keep your final answer concise, clear, and directly grounded in the tool observations."""
+3. For comparative questions (such as "which is highest and by how much?" or "compare top two"), retrieve at least the top 2+ rows (do NOT set `limit=1`) so both values come directly from `query_data`.
+4. Watch for messy real-world data seen in the schema (for example, trailing spaces like " North " or missing/NaN values). Prefer the `contains` operator when filtering text columns that may have extra spaces, and mention notable missing values if relevant.
+5. Call `make_chart` ONLY when the user asks for a chart/plot/graph/visual OR when a visual genuinely clarifies a comparison or trend.
+6. If a requested column or metric does not exist in the dataset, explain clearly what is missing based on the schema instead of guessing.
+7. Keep your final answer concise, clear, and directly grounded in the tool observations."""
 
 TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
@@ -149,14 +151,17 @@ TOOLS_SCHEMA: list[dict[str, Any]] = [
 
 
 def _execute_tool(df: pd.DataFrame, tool_name: str, args: dict[str, Any]) -> str:
-    """Dispatch a tool call from the LLM to the matching deterministic Python function."""
-    if tool_name == "inspect_schema":
-        return inspect_schema(df)
-    if tool_name == "query_data":
-        return query_data(df, **args)
-    if tool_name == "make_chart":
-        return make_chart(df, **args)
-    return json.dumps({"status": "error", "message": f"Unknown tool '{tool_name}'."})
+    """Dispatch a tool call with timeout protection and crash-to-JSON error recovery."""
+    try:
+        if tool_name == "inspect_schema":
+            return run_with_timeout(inspect_schema, df)
+        if tool_name == "query_data":
+            return run_with_timeout(query_data, df, **args)
+        if tool_name == "make_chart":
+            return run_with_timeout(make_chart, df, **args)
+        return json.dumps({"status": "error", "message": f"Unknown tool '{tool_name}'."})
+    except Exception as exc:
+        return json.dumps({"status": "error", "message": f"Tool execution error: {exc}"})
 
 
 def run_agent(
@@ -188,7 +193,6 @@ def run_agent(
         )
         msg = response.choices[0].message
 
-        # Case 1: Model returned a Final Answer (no tool calls)
         if not msg.tool_calls:
             final_answer = msg.content or "No answer generated."
             trace.append({"step": step, "type": "final_answer", "content": final_answer})
@@ -199,7 +203,6 @@ def run_agent(
                 "steps_used": step,
             }
 
-        # Record assistant message (including any Thought text + requested tool calls)
         assistant_record: dict[str, Any] = {
             "role": "assistant",
             "content": msg.content,
@@ -214,7 +217,6 @@ def run_agent(
         }
         messages.append(assistant_record)
 
-        # Case 2: Execute each requested tool and feed Observations back to the LLM
         for tc in msg.tool_calls:
             tool_name = tc.function.name
             try:
@@ -225,7 +227,6 @@ def run_agent(
             else:
                 observation = _execute_tool(df, tool_name, args)
 
-            # Capture chart path if make_chart succeeded
             if tool_name == "make_chart":
                 try:
                     obs_data = json.loads(observation)
@@ -263,23 +264,7 @@ def run_agent(
 
 if __name__ == "__main__":
     demo_df = pd.read_csv("data/demo_sales.csv")
-    test_questions = [
-        "Which product category generated the highest Closed Won revenue, and by how much?",
-        "How much total revenue came from the North region? Plot a bar chart of Closed Won revenue by region.",
-        "What is the average customer satisfaction score?",
-    ]
-
-    for q in test_questions:
-        print("\n" + "=" * 70)
-        print(f"QUESTION: {q}")
-        result = run_agent(q, demo_df)
-        for item in result["trace"]:
-            if item.get("type") == "final_answer":
-                print(f"[Step {item['step']} | FINAL ANSWER]")
-            else:
-                print(f"[Step {item['step']} | ACTION] {item['action']}({item['action_input']})")
-                preview = item["observation"][:220].replace("\n", " ")
-                print(f"          [OBSERVATION] {preview}...")
-        print(f"\nANSWER:\n{result['answer']}")
-        if result["chart_path"]:
-            print(f"CHART SAVED: {result['chart_path']}")
+    q1 = "Which product category generated the highest Closed Won revenue, and by how much over the second highest?"
+    print(f"QUESTION: {q1}")
+    res = run_agent(q1, demo_df)
+    print(f"\nANSWER:\n{res['answer']}")

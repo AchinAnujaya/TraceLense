@@ -1,0 +1,10 @@
+
+# Python & uv
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Secrets & generated chart artifacts
+.env
+outputs/*.png

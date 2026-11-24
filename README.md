@@ -13,6 +13,8 @@ pinned: false
 
 Ask plain-English questions about any CSV dataset and get verified answers, publication-ready charts, and a collapsible step-by-step reasoning trace—with **zero LLM mental arithmetic** and **zero arbitrary code execution**.
 
+**Live App:** [https://tracelense.onrender.com/](https://tracelense.onrender.com/) _(Hosted on Render free tier — initial load may take ~45s if waking from sleep)_
+
 ---
 
 ## Architecture Overview
